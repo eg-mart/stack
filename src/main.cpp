@@ -20,17 +20,15 @@ int main()
 //-------------------------------
 	struct Stack stk = {};
 	STACK_CTOR(&stk);
+	STACK_CTOR(&stk);
 
 	for (int i = 0; i < 10; i++) {
 		stack_push(&stk, i);
 	}
 
-	stk.capacity = 10000;
-	stk.size = 100;
-	((canary_t*) stk.data)[-1] = 0;
 	enum StackError err = STACK_NO_ERR;
 	int elem = 0;
-	while (err >= 0) {
+	for (int i = 0; i < 100; i++) {
 		err = stack_pop(&stk, &elem);
 	}
 
