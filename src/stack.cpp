@@ -15,9 +15,17 @@
 
 const int INIT_CAPACITY = 2;
 
+#ifdef CANARY_PROTECTION
+const canary_t DEFAULT_CANARY = 0xDECAFBAD;
+#endif
+
+#ifdef HASH_PROTECTION
+unsigned long gnu_hash(void *data_ptr, size_t size);
+#endif
+
 enum StackError reallocate_stack(struct Stack *stk, size_t old_size, size_t new_size);
 enum StackError validate_stack(struct Stack *stk, struct StackFailure *err);
-void stack_report_fail(const struct Stack *stk, struct StackFailure err,
+void stack_report_fail(struct Stack *stk, struct StackFailure err,
 					   const char *filename, int line, const char *func_name);
 
 enum StackError stack_ctor(struct Stack *stk, const char *varname, int line, 
@@ -30,10 +38,27 @@ enum StackError stack_ctor(struct Stack *stk, const char *varname, int line,
 		abort();
 	}
 
+	if (stk->data || stk->capacity != 0 || stk->size != 0) {
+		err.double_ctor = 1;
+		STACK_REPORT_FAIL(stk, err);
+		abort();
+	}
+
 	stk->size = 0;
 	stk->capacity = INIT_CAPACITY;
-	stk->data = (elem_t*) calloc(INIT_CAPACITY, sizeof(elem_t));
-	if (stk->data == NULL) return ERR_NO_MEM;
+	elem_t *mem = NULL;
+
+#ifdef CANARY_PROTECTION
+	stk->capacity += (sizeof(canary_t) - stk->capacity % sizeof(canary_t)) % sizeof(canary_t);
+	mem = (elem_t*) calloc(stk->capacity * sizeof(elem_t) + 2 * sizeof(canary_t),
+						   sizeof(char));
+	if (mem == NULL) return ERR_NO_MEM;
+	stk->data = (elem_t*) ((char*) mem + sizeof(canary_t));
+#else
+	mem = (elem_t*) calloc(stk->capacity, sizeof(elem_t));
+	if (mem == null) return err_no_mem;
+	stk->data = mem;
+#endif
 
 	for (size_t i = 0; i < stk->capacity; i++)
 		stk->data[i] = POISON;
@@ -42,6 +67,20 @@ enum StackError stack_ctor(struct Stack *stk, const char *varname, int line,
 	stk->line = line;
 	stk->varname = varname;
 	stk->funcname = funcname;
+
+#ifdef CANARY_PROTECTION
+	stk->left_canary = DEFAULT_CANARY;
+	stk->right_canary = DEFAULT_CANARY;
+	((canary_t*) stk->data)[-1] = DEFAULT_CANARY;
+	*((canary_t*) (stk->data + stk->capacity)) = DEFAULT_CANARY;
+#endif
+
+#ifdef HASH_PROTECTION
+	stk->hash = 0;
+	stk->data_hash = 0;
+	stk->hash = gnu_hash(stk, sizeof(Stack));
+	stk->data_hash = gnu_hash(stk->data, stk->capacity);
+#endif
 	
 	return STACK_NO_ERR;
 }
@@ -52,8 +91,21 @@ enum StackError stack_dtor(struct Stack *stk)
 	
 	stk->size = 0;
 	stk->capacity = 0;
+
+#ifdef CANARY_PROTECTION
+	stk->right_canary = 0;
+	stk->left_canary = 0;
+	free((char*) stk->data - sizeof(canary_t));
+#else
 	free(stk->data);
+#endif
+
 	stk->data = NULL;
+
+#ifdef HASH_PROTECTION
+	stk->hash = 0;
+	stk->data_hash = 0;
+#endif
 
 	return STACK_NO_ERR;
 }
@@ -81,6 +133,49 @@ enum StackError validate_stack(struct Stack *stk, struct StackFailure *err)
 		return_status = STACK_FAILED;
 	}
 
+
+#ifdef CANARY_PROTECTION
+	if (stk->data)
+		if (((canary_t*) stk->data)[-1] != DEFAULT_CANARY) {
+			err->left_data_canary_bad = 1;
+			return_status = STACK_FAILED;
+		}
+#endif
+
+#ifdef HASH_PROTECTION
+	unsigned long old_hash = stk->hash;
+	unsigned long old_data_hash = stk->data_hash;
+	stk->hash = 0;
+	stk->data_hash = 0;
+	if (old_hash != gnu_hash(stk, sizeof(Stack))) {
+		err->wrong_hash = 1;
+		return STACK_FAILED;
+	} else if (old_data_hash != gnu_hash(stk->data, stk->capacity)) {
+		err->wrong_data_hash = 1;
+		return_status = STACK_FAILED;
+	}
+	stk->hash = old_hash;
+	stk->data_hash = old_data_hash;
+#endif
+
+#ifdef CANARY_PROTECTION
+	if (stk->left_canary != DEFAULT_CANARY) {
+		err->left_canary_bad = 1;
+		return STACK_FAILED;
+	}
+
+	if (stk->right_canary != DEFAULT_CANARY) {
+		err->right_canary_bad = 1;
+		return STACK_FAILED;
+	}
+
+	if (stk->data)
+		if (*((canary_t*) (stk->data + stk->capacity)) != DEFAULT_CANARY) {
+			err->left_data_canary_bad = 1;
+			return_status = STACK_FAILED;
+		}
+#endif
+
 	if (stk->data) {
 		for (size_t i = 0; i < stk->size && i < stk->capacity; i++)
 			if (stk->data[i] == POISON) {
@@ -102,23 +197,67 @@ enum StackError validate_stack(struct Stack *stk, struct StackFailure *err)
 	return return_status;
 }
 
-void stack_dump(const struct Stack *stk)
+void stack_dump(struct Stack *stk)
 {
 	const int POISONED_MAX = 20;
-	log_message(DEBUG, "Stack [%p] \"%s\" from %s (%d) %s\n",
+	log_message(DEBUG, "Stack [%p] \"%s\" from %s (%d) %s()\n",
 				stk, stk->varname, stk->filename, stk->line, stk->funcname);
 
 	if (!stk) return;
 	log_string(DEBUG, "\t{\n\t\tsize = %lu\n"
-			   "\t\tcapacity = %lu\n"
-			   "\t\tdata [%p]\n",
-			   stk->size, stk->capacity, stk->data);
+			   "\t\tcapacity = %lu\n",
+			   stk->size, stk->capacity);
+
+#ifdef CANARY_PROTECTION
+	log_string(DEBUG, "\t\tleft canary = 0x%llX\n"
+			   "\t\tright canary = 0x%llX\n"
+			   "\t\tdefault canary = 0x%llX\n",
+			   stk->left_canary, stk->right_canary, DEFAULT_CANARY);
+#endif
+
+#ifdef HASH_PROTECTION
+	unsigned long old_hash = stk->hash;
+	unsigned long old_data_hash = stk->data_hash;
+	stk->hash = 0;
+	stk->data_hash = 0;
+	unsigned long new_hash = gnu_hash(stk, sizeof(Stack));
+	log_string(DEBUG, "\t\thash = 0x%lX\n"
+			   "\t\tactual hash = 0x%lX\n",
+			   old_hash, new_hash);
+
+	if (old_hash == new_hash)
+		log_string(DEBUG, "\t\tdata hash = 0x%lX\n"
+				   "\t\tactual data hash = 0x%lX\n",
+				   old_data_hash, gnu_hash(stk->data, stk->capacity));
+
+	stk->hash = old_hash;
+	stk->data_hash = old_data_hash;
+#endif
+
+	log_string(DEBUG, "\t\tdata [%p]\n", stk->data);
 
 	if (!stk->data) {
 		log_string(DEBUG, "\t}\n");
 		return;
 	}
+
 	log_string(DEBUG, "\t\t{\n");
+
+#ifdef CANARY_PROTECTION
+	log_string(DEBUG, "\t\t\tleft canary = 0x%lX\n", ((canary_t*) stk->data)[-1]);
+	if (stk->left_canary != DEFAULT_CANARY || stk->right_canary != DEFAULT_CANARY) {
+		log_string(DEBUG, "\t\t}\n\t}\n");
+		return;
+	}
+#endif
+
+#ifdef HASH_PROTECTION
+	if (old_hash != new_hash) {
+		log_string(DEBUG, "\t\t}\n\t}\n");
+		return;
+	}
+#endif
+
 	size_t i = 0;
 	for (; i < stk->size && i < stk->capacity; i++) {
 		log_string(DEBUG, "\t\t\t*[%lu] = " FMT, i, stk->data[i]);
@@ -131,10 +270,15 @@ void stack_dump(const struct Stack *stk)
 		log_string(DEBUG, "\n");
 	}
 
+#ifdef CANARY_PROTECTION
+	log_string(DEBUG, "\t\t\tright canary = 0x%lX\n", 
+			   *((canary_t*) (stk->data + stk->capacity)));
+#endif
+
 	log_string(DEBUG, "\t\t}\n\t}\n");
 }
 
-void stack_report_fail(const struct Stack *stk, struct StackFailure err,
+void stack_report_fail(struct Stack *stk, struct StackFailure err,
 					   const char *filename, int line, const char *func_name)
 {
 
@@ -146,6 +290,19 @@ void stack_report_fail(const struct Stack *stk, struct StackFailure err,
 	if (err.poisoned_value) log_message(ERROR, "A poison value is in stack!\n");
 	if (err.unpoisoned_value) log_message(ERROR, "A non-poison value is in stack's "
 										  "unused memory!\n");
+	if (err.double_ctor) log_message(ERROR, "A constructor was called twice!\n");
+
+#ifdef CANARY_PROTECTION
+	if (err.left_canary_bad) log_message(ERROR, "Stack's left canary is bad!\n");
+	if (err.right_canary_bad) log_message(ERROR, "Stack's right canary is bad!\n");
+	if (err.left_data_canary_bad) log_message(ERROR, "Stack's data left canary is bad!\n");
+	if (err.right_data_canary_bad) log_message(ERROR, "Stack's data right canary is bad!\n");
+#endif
+
+#ifdef HASH_PROTECTION
+	if (err.wrong_hash) log_message(ERROR, "Stack's hash doesn't match!\n");
+	if (err.wrong_data_hash) log_message(ERROR, "Stack's data hash doesn't match!\n");
+#endif
 
 	log_message(DEBUG, "stack_dump called from %s (%d) %s()\n",
 				filename, line, func_name);
@@ -160,13 +317,38 @@ enum StackError reallocate_stack(struct Stack *stk, size_t old_size, size_t new_
 	log_message(DEBUG, "reallocate_stack was called with "
 				"new_size: %lu and old_size: %lu\n", new_size, old_size);
 
-	stk->data = (elem_t*) realloc(stk->data, new_size * sizeof(elem_t));
-	if (!stk->data) return ERR_NO_MEM;
-	stk->capacity = new_size;
+	elem_t *mem = NULL;
 
+#ifdef CANARY_PROTECTION
+	new_size += (sizeof(canary_t) - new_size % sizeof(canary_t)) % sizeof(canary_t);
+	if (new_size == old_size)
+		return STACK_NO_ERR;
+	
+	mem = (elem_t*) realloc((char*) stk->data - sizeof(canary_t),
+							new_size * sizeof(elem_t) + 2 * sizeof(canary_t));
+	if (!mem) return ERR_NO_MEM;
+	stk->data = (elem_t*) ((char*) mem + sizeof(canary_t));
+#else
+	mem = (elem_t*) realloc(stk->data, new_size * sizeof(elem_t));
+	if (!mem) return ERR_NO_MEM;
+	stk->data = mem;
+#endif
+
+	stk->capacity = new_size;
 	if (new_size > old_size)
 		for (size_t i = old_size; i < new_size; i++)
 			stk->data[i] = POISON;
+
+#ifdef HASH_PROTECTION
+	stk->hash = 0;
+	stk->data_hash = 0;
+	stk->hash = gnu_hash(stk, sizeof(Stack));
+	stk->data_hash = gnu_hash(stk->data, stk->capacity);
+#endif
+
+#ifdef CANARY_PROTECTION
+	*((canary_t*) (stk->data + stk->capacity)) = DEFAULT_CANARY;
+#endif
 
 	return STACK_NO_ERR;
 }
@@ -181,6 +363,13 @@ enum StackError stack_push(struct Stack *stk, elem_t value)
 	}
 
 	stk->data[stk->size++] = value;
+
+#ifdef HASH_PROTECTION
+	stk->hash = 0;
+	stk->data_hash = 0;
+	stk->hash = gnu_hash(stk, sizeof(Stack));
+	stk->data_hash = gnu_hash(stk->data, stk->capacity);
+#endif
 
 	return STACK_NO_ERR;
 }
@@ -199,5 +388,25 @@ enum StackError stack_pop(struct Stack *stk, elem_t *value)
 	*value = stk->data[--stk->size];
 	stk->data[stk->size] = POISON;
 
+#ifdef HASH_PROTECTION
+	stk->hash = 0;
+	stk->data_hash = 0;
+	stk->hash = gnu_hash(stk, sizeof(Stack));
+	stk->data_hash = gnu_hash(stk->data, stk->capacity);
+#endif
+
 	return STACK_NO_ERR;
 }
+
+#ifdef HASH_PROTECTION
+unsigned long gnu_hash(void *data_ptr, size_t size)
+{
+	char *data = (char*) data_ptr;
+	unsigned long hash = 5381;
+
+	for (size_t i = 0; i < size; i++)
+		hash = ((hash << 5) + hash) + (long unsigned int) data[i];
+
+	return hash;
+}
+#endif

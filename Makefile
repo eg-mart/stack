@@ -19,11 +19,15 @@ CC = g++
 VPATH = src
 .PHONY : clean
 
-all : stack
-
 OBJS_NAMES = stack.o logger.o
 OBJDIR = build
 OBJS = $(addprefix $(OBJDIR)/, $(OBJS_NAMES))
+
+all : stack
+all : CFLAGS += -DCANARY_PROTECTION
+all : CFLAGS += -DHASH_PROTECTION
+
+release : stack
 
 stack : $(OBJS) $(OBJDIR)/main.o
 	$(CC) $(CFLAGS) -o stack $(OBJS) $(OBJDIR)/main.o

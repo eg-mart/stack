@@ -9,7 +9,20 @@
 typedef int elem_t;
 const elem_t POISON = INT_MAX;
 
+#ifdef CANARY_PROTECTION
+typedef unsigned long long canary_t;
+#endif
+
 struct Stack {
+#ifdef CANARY_PROTECTION
+	canary_t left_canary;
+#endif
+
+#ifdef HASH_PROTECTION
+	unsigned long hash;
+	unsigned long data_hash;
+#endif
+
 	size_t capacity;
 	size_t size;
 	elem_t *data;
@@ -17,6 +30,10 @@ struct Stack {
 	const char *filename;
 	const char *funcname;
 	int line;
+
+#ifdef CANARY_PROTECTION
+	canary_t right_canary;
+#endif
 };
 
 enum StackError {
@@ -33,6 +50,19 @@ struct StackFailure {
 	unsigned int poisoned_value : 1;
 	unsigned int unpoisoned_value : 1;
 	unsigned int small_capacity : 1;
+	unsigned int double_ctor : 1;
+
+#ifdef CANARY_PROTECTION
+	unsigned int left_canary_bad : 1;
+	unsigned int right_canary_bad : 1;
+	unsigned int right_data_canary_bad : 1;
+	unsigned int left_data_canary_bad : 1;
+#endif
+
+#ifdef HASH_PROTECTION
+	unsigned int wrong_hash : 1;
+	unsigned int wrong_data_hash : 1;
+#endif
 };
 
 enum StackError stack_ctor(struct Stack *stk, const char *varname, int line, 
@@ -40,6 +70,6 @@ enum StackError stack_ctor(struct Stack *stk, const char *varname, int line,
 enum StackError stack_dtor(struct Stack *stk);
 enum StackError stack_push(struct Stack *stk, elem_t value);
 enum StackError stack_pop(struct Stack *stk, elem_t *value);
-void stack_dump(const struct Stack *stk);
+void stack_dump(struct Stack *stk);
 
 #endif
