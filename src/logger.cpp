@@ -32,14 +32,21 @@ enum Log_error add_log_handler(struct Log_handler handler)
 			return ERR_MEM;
 	}
 
+	LOGGER.handlers[LOGGER.num_handlers] = handler;
+
+	fprintf(LOGGER.handlers[LOGGER.num_handlers].output,
+			"\tSTART OF LOG\n-----------------------------\n\n");
 	LOGGER.num_handlers++;
-	LOGGER.handlers[LOGGER.num_handlers - 1] = handler;
 
 	return NO_LOG_ERR;
 }
 
 void logger_dtor()
 {
+	for (size_t i = 0; i < LOGGER.num_handlers; i++)
+		fprintf(LOGGER.handlers[i].output,
+				"\n-----------------------------\n\tEND OF LOG\n");
+	
 	free(LOGGER.handlers);
 }
 
@@ -53,7 +60,7 @@ enum Log_error do_log(enum Log_level level, const char *prefix, const char *colo
 	const size_t BUFF_SIZE = 1024;
 	char buff[BUFF_SIZE] = "";
 	
-	vsnprintf(buff, BUFF_SIZE, message, args);
+	int written = vsnprintf(buff, BUFF_SIZE, message, args);
 	
 	bool error = 0;
 	for (size_t i = 0; i < LOGGER.num_handlers; i++) {
@@ -66,8 +73,12 @@ enum Log_error do_log(enum Log_level level, const char *prefix, const char *colo
 		else
 			fprintf(LOGGER.handlers[i].output, "%s %s", prefix, buff);
 
-		error = error && ferror(LOGGER.handlers[i].output);
+		error = error || ferror(LOGGER.handlers[i].output);
 	}
+
+	if (written > (int) BUFF_SIZE - 1)
+		if (log_string(level, "...message was truncated\n") < 0)
+			return ERR_WRITE;
 	
 	if (error)
 		return ERR_WRITE;

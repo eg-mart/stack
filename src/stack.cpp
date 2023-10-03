@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "logger.h"
 #include "stack.h"
@@ -7,18 +8,21 @@
 
 enum StackError reallocate_stack(struct Stack *stk, size_t old_size, size_t new_size);
 
-enum StackError stack_ctor(struct Stack *stk, const char *varname, int line, 
-						   const char *filename, const char *funcname)
+enum StackError stack_ctor(struct Stack *stk, print_func print_elem,
+						   const char *varname, int line, const char *filename,
+						   const char *funcname)
 {
-	struct StackFailure err = {};
+	int err = {};
 	if (!stk) {
-		err.null_stack_pointer = 1;
+		err |= 1 << NULL_STACK_POINTER;
 		STACK_REPORT_FAIL(stk, err);
 		abort();
 	}
 
+	PRINT_ELEM = print_elem;
+
 	if (stk->data || stk->capacity != 0 || stk->size != 0) {
-		err.double_ctor = 1;
+		err |= 1 << DOUBLE_CTOR;
 		STACK_REPORT_FAIL(stk, err);
 		abort();
 	}
@@ -32,16 +36,15 @@ enum StackError stack_ctor(struct Stack *stk, const char *varname, int line,
 	mem = (elem_t*) calloc(stk->capacity * sizeof(elem_t) + 2 * sizeof(canary_t),
 						   sizeof(char));
 	if (mem == NULL) return ERR_NO_MEM;
-	stk->data = (elem_t*) ((char*) mem + sizeof(canary_t));
+	stk->data = (elem_t*) ((unsigned char*) mem + sizeof(canary_t));
 #else
 	mem = (elem_t*) calloc(stk->capacity, sizeof(elem_t));
-	if (mem == null) return err_no_mem;
+	if (mem == NULL) return ERR_NO_MEM;
 	stk->data = mem;
 #endif
 
-	for (size_t i = 0; i < stk->capacity; i++)
-		stk->data[i] = POISON;
-
+	memset(stk->data, POISON, stk->capacity * sizeof(elem_t));
+	
 	stk->filename = filename;
 	stk->line = line;
 	stk->varname = varname;
@@ -71,7 +74,7 @@ enum StackError stack_dtor(struct Stack *stk)
 #ifdef CANARY_PROTECTION
 	stk->right_canary = 0;
 	stk->left_canary = 0;
-	free((char*) stk->data - sizeof(canary_t));
+	free((unsigned char*) stk->data - sizeof(canary_t));
 #else
 	free(stk->data);
 #endif
@@ -90,6 +93,8 @@ enum StackError reallocate_stack(struct Stack *stk, size_t old_size, size_t new_
 {
 	VALIDATE_STACK(stk);
 
+	log_message(DEBUG, "reallocated stack from %lu to %lu\n", old_size, new_size);
+
 	elem_t *mem = NULL;
 
 #ifdef CANARY_PROTECTION
@@ -97,10 +102,10 @@ enum StackError reallocate_stack(struct Stack *stk, size_t old_size, size_t new_
 	if (new_size == old_size)
 		return STACK_NO_ERR;
 	
-	mem = (elem_t*) realloc((char*) stk->data - sizeof(canary_t),
+	mem = (elem_t*) realloc((unsigned char*) stk->data - sizeof(canary_t),
 							new_size * sizeof(elem_t) + 2 * sizeof(canary_t));
 	if (!mem) return ERR_NO_MEM;
-	stk->data = (elem_t*) ((char*) mem + sizeof(canary_t));
+	stk->data = (elem_t*) ((unsigned char*) mem + sizeof(canary_t));
 #else
 	mem = (elem_t*) realloc(stk->data, new_size * sizeof(elem_t));
 	if (!mem) return ERR_NO_MEM;
@@ -109,8 +114,7 @@ enum StackError reallocate_stack(struct Stack *stk, size_t old_size, size_t new_
 
 	stk->capacity = new_size;
 	if (new_size > old_size)
-		for (size_t i = old_size; i < new_size; i++)
-			stk->data[i] = POISON;
+		memset(stk->data + old_size, POISON, (new_size - old_size) * sizeof(elem_t));
 
 #ifdef HASH_PROTECTION
 	update_hash(stk);
@@ -128,7 +132,8 @@ enum StackError stack_push(struct Stack *stk, elem_t value)
 	VALIDATE_STACK(stk);
 
 	if (stk->size == stk->capacity) {
-		enum StackError error = reallocate_stack(stk, stk->capacity, stk->capacity * 2);
+		enum StackError error = reallocate_stack(stk, stk->capacity,
+												 stk->capacity * MULTIPLIER);
 		if (error < 0) return error;
 	}
 
@@ -145,15 +150,16 @@ enum StackError stack_pop(struct Stack *stk, elem_t *value)
 {
 	VALIDATE_STACK(stk);
 
-	if (stk->size < stk->capacity / 4 && stk->capacity > INIT_CAPACITY) {
-		enum StackError error = reallocate_stack(stk, stk->capacity, stk->capacity / 2);
+	if (stk->size * SHRINK_COEF <= stk->capacity && stk->capacity > INIT_CAPACITY) {
+		enum StackError error = reallocate_stack(stk, stk->capacity, 
+												 stk->capacity / MULTIPLIER);
 		if (error < 0) return error;
 	}
 
 	if (stk->size == 0) return ERR_STACK_EMPTY;
 
 	*value = stk->data[--stk->size];
-	stk->data[stk->size] = POISON;
+	memset(stk->data + stk->size, POISON, sizeof(elem_t));
 
 #ifdef HASH_PROTECTION
 	update_hash(stk);
